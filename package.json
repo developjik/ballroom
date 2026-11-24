@@ -1,0 +1,39 @@
+{
+  "name": "ballroom",
+  "version": "0.1.0",
+  "description": "Self-hosted multi-agent collaboration room with board truth, lease separation, execution gates, and conformance tests",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "bin": {
+    "ballroomd": "./src/main.ts"
+  },
+  "files": [
+    "src",
+    "public",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "tsx src/main.ts",
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:conformance": "vitest run tests/conformance.phase1.test.ts tests/conformance.supplements.test.ts",
+    "sim:phase0": "tsx src/sim/phase0.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.2.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.4"
+  }
+}

@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ballroom — board</title>
+    <style>
+      :root {
+        --bg: #0c0e12;
+        --panel: #14171d;
+        --panel-2: #191d25;
+        --line: #262b35;
+        --text: #e7eaf0;
+        --muted: #8b93a4;
+        --accent: #7cc4ff;
+        --ok: #57d68d;
+        --warn: #ffcc66;
+        --bad: #ff7a85;
+        --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      }
+      header {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+        padding: 14px 18px;
+        border-bottom: 1px solid var(--line);
+        position: sticky;
+        top: 0;
+        background: rgba(12, 14, 18, 0.94);
+        backdrop-filter: blur(8px);
+        z-index: 5;
+      }
+      h1 { font-size: 15px; margin: 0; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+      .room { font-family: var(--mono); font-size: 16px; color: var(--text); }
+      .chip {
+        font-family: var(--mono);
+        font-size: 12px;
+        padding: 2px 8px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+      }
+      .chip b { color: var(--text); font-weight: 600; }
+      .spacer { flex: 1; }
+      input[type="text"] {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        color: var(--text);
+        border-radius: 8px;
+        padding: 6px 10px;
+        font-family: var(--mono);
+        font-size: 12px;
+        width: 240px;
+      }
+      button {
+        background: var(--panel-2);
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 6px 10px;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      button:hover { border-color: var(--accent); }
+      button.primary { border-color: #2f6b4a; color: var(--ok); }
+      button.danger { border-color: #6b2f36; color: var(--bad); }
+      main { display: grid; grid-template-columns: 1fr 330px; gap: 14px; padding: 14px 18px 40px; }
+      @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+      .board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(220px, 1fr); gap: 10px; overflow-x: auto; padding-bottom: 8px; }
+      .column { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px; min-height: 160px; }
+      .column h2 { font-size: 11px; margin: 0 0 8px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); display: flex; justify-content: space-between; }
+      .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; margin-bottom: 8px; }
+      .card .title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+      .meta { font-family: var(--mono); font-size: 11px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px; }
+      .tag { border: 1px solid var(--line); border-radius: 6px; padding: 0 5px; }
+      .tag.risk-irreversible, .tag.risk-spend, .tag.risk-outbound { color: var(--warn); border-color: #4a3b1c; }
+      .tag.attempt { color: var(--bad); border-color: #4a2228; }
+      .tag.lease { color: var(--accent); border-color: #1f3a4f; }
+      aside { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+      .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+      .panel h2 { font-size: 11px; margin: 0 0 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+      .approval { border: 1px solid #4a3b1c; border-radius: 10px; padding: 10px; margin-bottom: 10px; background: #1a1710; }
+      .approval pre { margin: 6px 0; font-family: var(--mono); font-size: 11px; white-space: pre-wrap; word-break: break-all; color: var(--text); }
+      .approval .row { display: flex; gap: 6px; margin-top: 8px; }
+      .feed { font-family: var(--mono); font-size: 11px; max-height: 460px; overflow-y: auto; }
+      .feed div { padding: 4px 0; border-bottom: 1px solid #1d222b; color: var(--muted); word-break: break-word; }
+      .feed b { color: var(--text); font-weight: 500; }
+      .feed .seq { color: #4d5666; margin-right: 6px; }
+      .agents { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+      .agents div { padding: 3px 0; }
+      .empty { color: var(--muted); font-size: 12px; font-family: var(--mono); }
+      .toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: #241a1d; border: 1px solid #6b2f36; color: var(--bad); padding: 8px 14px; border-radius: 10px; font-family: var(--mono); font-size: 12px; display: none; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>ballroom</h1>
+      <span class="room" id="room">—</span>
+      <span class="chip" id="stat-running">running <b>0</b></span>
+      <span class="chip" id="stat-open">open <b>0</b></span>
+      <span class="chip" id="stat-blocked">blocked <b>0</b></span>
+      <span class="chip" id="stat-cursor">seq <b>0</b></span>
+      <span class="spacer"></span>
+      <input id="token" type="text" placeholder="owner token (stored locally)" autocomplete="off" />
+      <button id="refresh">refresh</button>
+    </header>
+    <main>
+      <section class="board" id="board"></section>
+      <aside>
+        <div class="panel">
+          <h2>Pending approvals</h2>
+          <div id="approvals" class="empty">none</div>
+        </div>
+        <div class="panel">
+          <h2>Agents</h2>
+          <div id="agents" class="agents empty">none</div>
+        </div>
+        <div class="panel">
+          <h2>Event log (last 60)</h2>
+          <div id="feed" class="feed"></div>
+        </div>
+      </aside>
+    </main>
+    <div class="toast" id="toast"></div>
+
+    <script>
+      const STATUSES = ['running', 'awaiting_approval', 'review', 'assigned', 'waiting', 'open', 'blocked', 'done', 'failed'];
+      const params = new URLSearchParams(location.search);
+      const room = params.get('room') || 'main';
+      const tokenInput = document.getElementById('token');
+      tokenInput.value = localStorage.getItem('ballroom:token') || '';
+      tokenInput.addEventListener('change', () => {
+        localStorage.setItem('ballroom:token', tokenInput.value.trim());
+        load();
+      });
+      document.getElementById('refresh').addEventListener('click', load);
+
+      const auth = () => (tokenInput.value.trim() ? { authorization: `Bearer ${tokenInput.value.trim()}` } : {});
+      const el = (tag, text, cls) => {
+        const node = document.createElement(tag);
+        if (text !== undefined) node.textContent = text;
+        if (cls) node.className = cls;
+        return node;
+      };
+      const toast = (message) => {
+        const node = document.getElementById('toast');
+        node.textContent = message;
+        node.style.display = 'block';
+        clearTimeout(node._timer);
+        node._timer = setTimeout(() => (node.style.display = 'none'), 4000);
+      };
+      const short = (id) => (id || '').replace(/^task_/, '').slice(0, 8);
+      const ago = (iso) => {
+        if (!iso) return '—';
+        const seconds = Math.round((Date.now() - Date.parse(iso)) / 1000);
+        if (seconds < 0) return `in ${Math.abs(seconds)}s`;
+        if (seconds < 90) return `${seconds}s ago`;
+        if (seconds < 5400) return `${Math.round(seconds / 60)}m ago`;
+        return `${Math.round(seconds / 3600)}h ago`;
+      };
+
+      function card(task) {
+        const node = el('div', undefined, 'card');
+        node.appendChild(el('div', task.title, 'title'));
+        const meta = el('div', undefined, 'meta');
+        meta.appendChild(el('span', short(task.id), 'tag'));
+        meta.appendChild(el('span', task.risk, `tag risk-${task.risk}`));
+        meta.appendChild(el('span', `${task.check?.kind || 'human'}`, 'tag'));
+        if (task.assignee) meta.appendChild(el('span', `@${task.assignee}`, 'tag'));
+        if (task.attempt > 0) meta.appendChild(el('span', `attempt ${task.attempt}`, 'tag attempt'));
+        if (task.status === 'running' && task.lease_until) meta.appendChild(el('span', `lease ${ago(task.lease_until)}`, 'tag lease'));
+        if (task.scope_lock) meta.appendChild(el('span', task.scope_lock, 'tag'));
+        meta.appendChild(el('span', `v${task.version}`, 'tag'));
+        node.appendChild(meta);
+        if (task.wait_reason) node.appendChild(el('div', `waiting: ${task.wait_reason}`, 'meta'));
+        return node;
+      }
+
+      async function decide(id, decision) {
+        try {
+          const response = await fetch(`/v1/approvals/${id}/decision`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...auth() },
+            body: JSON.stringify({ decision }),
+          });
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.error?.message || response.statusText);
+          await load();
+        } catch (error) {
+          toast(`decision failed: ${error.message}`);
+        }
+      }
+
+      function render(board) {
+        document.getElementById('room').textContent = board.room.room + (board.room.unattended ? ' · unattended' : '');
+        const boardEl = document.getElementById('board');
+        boardEl.replaceChildren();
+        for (const status of STATUSES) {
+          const tasks = board.tasks.filter((task) => task.status === status);
+          const column = el('div', undefined, 'column');
+          const heading = el('h2');
+          heading.appendChild(el('span', status.replace('_', ' ')));
+          heading.appendChild(el('span', String(tasks.length)));
+          column.appendChild(heading);
+          if (tasks.length === 0) column.appendChild(el('div', '—', 'empty'));
+          tasks.forEach((task) => column.appendChild(card(task)));
+          boardEl.appendChild(column);
+        }
+        document.querySelector('#stat-running b').textContent = board.stats.running || 0;
+        document.querySelector('#stat-open b').textContent = board.stats.open || 0;
+        document.querySelector('#stat-blocked b').textContent = board.stats.blocked || 0;
+        document.querySelector('#stat-cursor b').textContent = board.cursor;
+
+        const approvals = document.getElementById('approvals');
+        approvals.replaceChildren();
+        if (!board.approvals.length) {
+          approvals.className = 'empty';
+          approvals.textContent = 'none';
+        } else {
+          approvals.className = '';
+          for (const approval of board.approvals) {
+            const box = el('div', undefined, 'approval');
+            box.appendChild(el('div', `@${approval.agent_id} · ${approval.risk}`, 'meta'));
+            const pre = el('pre', approval.normalized_command || approval.preview || approval.action_hash);
+            box.appendChild(pre);
+            const row = el('div', undefined, 'row');
+            const approve = el('button', 'approve (one use)', 'primary');
+            approve.addEventListener('click', () => decide(approval.id, 'approve'));
+            const deny = el('button', 'deny', 'danger');
+            deny.addEventListener('click', () => decide(approval.id, 'deny'));
+            row.append(approve, deny);
+            box.appendChild(row);
+            box.appendChild(el('div', `expires ${ago(approval.expires_at)}`, 'meta'));
+            approvals.appendChild(box);
+          }
+        }
+
+        const agents = document.getElementById('agents');
+        agents.replaceChildren();
+        if (!board.agents.length) {
+          agents.className = 'agents empty';
+          agents.textContent = 'none';
+        } else {
+          agents.className = 'agents';
+          for (const agent of board.agents) {
+            agents.appendChild(el('div', `@${agent.id} · ${agent.kind} · ${agent.wake} · ${agent.gate}${agent.approval_delegated ? ' · delegated' : ''}`));
+          }
+        }
+
+        const feed = document.getElementById('feed');
+        feed.replaceChildren();
+        for (const event of [...board.events].reverse()) {
+          const line = el('div');
+          line.appendChild(el('span', `#${event.seq}`, 'seq'));
+          line.appendChild(el('b', event.type.replace('task.', '').replace('message.', 'msg·')));
+          const who = event.actor_agent ? `@${event.actor_agent}` : 'owner';
+          const snippet =
+            event.type === 'message.posted' && event.payload?.content
+              ? ` — ${String(event.payload.content).slice(0, 90)}`
+              : event.payload?.reason
+                ? ` — ${event.payload.reason}`
+                : '';
+          line.appendChild(el('span', ` ${who} ${ago(event.ts)}${snippet}`));
+          feed.appendChild(line);
+        }
+      }
+
+      async function load() {
+        try {
+          const response = await fetch(`/v1/rooms/${encodeURIComponent(room)}/board`, { headers: auth() });
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.error?.message || response.statusText);
+          render(body);
+        } catch (error) {
+          toast(`load failed: ${error.message}`);
+        }
+      }
+
+      load();
+      setInterval(() => {
+        if (!document.hidden) load();
+      }, 3000);
+    </script>
+  </body>
+</html>

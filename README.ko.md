@@ -37,7 +37,7 @@
 이 세 가지가 필요 없다면 [Crosswalk](https://crosswalk.to/) 같은 호스팅 보드가 더 싸다.
 무료이고 돌릴 것도 없다. 이건 홍보가 아니라 사실 비교다.
 
-## 들어 있는 것 (Phase 1)
+## 들어 있는 것 (Phase 1–2)
 
 | 구성 | 하는 일 | 위치 |
 |---|---|---|
@@ -50,6 +50,11 @@
 | 브레이커 | 에이전트 10건/60초, 방 40건/60초, 루프 서명 3회 | `src/breakers.ts` |
 | 아티팩트 | 메타데이터 + sha256 + 길이 제한 텍스트 미리보기(원격 비서용) | `src/ballroom.ts` |
 | 러너 어댑터 | 계약 하나, 적합성 스위트, herdr·damon 매핑 | `src/runner/` |
+| 게이트 훅 | 실제 `PreToolUse` 스크립트: `428` → exit 2 + 물어볼 승인 id, 방이 없으면 닫힘 | `src/hook/` |
+| 훅 설치기 | `.claude/settings.local.json`에 다른 설정을 건드리지 않고 병합 | `scripts/install-hooks.ts` |
+| 워커 루프 | 롱폴 → claim → 훅 → renew → usage → 아티팩트 → complete, 승인은 기다렸다 재개 | `src/worker/` |
+| CLI 러너 | 실제 자식 프로세스 구동, 진행 중 턴 조향, 산출물 업로드 | `src/runner/cli.ts` |
+| 맥 실기 검증 | 맥에서 차단을 직접 확인하고 흔적 없이 정리하는 스크립트 | `scripts/verify-phase0-mac.sh` |
 | 보드 화면 | HTML 한 장, 빌드 없음 | `public/index.html` |
 
 ## 빠른 시작
@@ -58,9 +63,16 @@ Node 22 이상이 필요하다(SQLite 드라이버 better-sqlite3 13 요구사�
 
 ```bash
 npm install
-npm run typecheck && npm test          # 테스트 35개 (5개 프로세스 claim 경쟁 포함)
+npm run typecheck && npm test          # 테스트 61개 (5개 프로세스 claim 경쟁 + 자식 프로세스 훅 포함)
 npm run sim:phase0                     # 가짜 시계로 24시간 재생, 결과 표 출력
 npm start                              # http://localhost:8787
+```
+
+이 맥에서 게이트를 직접 확인(임시 방을 띄워 force-push를 막고, 한 번 승인하고, 끝나면 전부 삭제):
+
+```bash
+./scripts/verify-phase0-mac.sh          # 약 5초
+./scripts/verify-phase0-mac.sh --full   # 워커 E2E(실제 자식 프로세스)까지
 ```
 
 `npm start`는 SQLite 파일을 만들고 소유자 토큰을 **한 번만** 출력하며 `main` 방을 만든다.
@@ -106,7 +118,51 @@ URL과 키만 가진 모델에게는 `GET /v1/docs`가 방·에이전트·사용
 **4. herdr와 damon-agent-core에 같은 러너 계약을 붙인다.**
 `start / resume / stop / status / usage / installGate`. `runRunnerConformance()`는 어댑터가
 스스로 돌려 볼 수 있는 공개 스위트이고, `src/runner/memory.ts`가 참조 구현,
-`herdr.ts`·`damon.ts`가 같은 여섯 호출을 각 도구에 매핑한다.
+`herdr.ts`·`damon.ts`가 같은 여섯 호출을 각 도구에 매핑하며 `cli.ts`는 실제 자식 프로세스를
+구동한다.
+
+## Phase 2 — 진짜 CLI 앞에 세운 게이트
+
+Phase 1은 게이트의 방 쪽 절반을 증명했고, Phase 2는 빠져 있던 나머지 절반 — 명령을 실제로
+거부하는 프로세스 — 를 붙였다.
+
+```
+에이전트 CLI ──도구 호출──▶ 훅 (src/hook/cli.ts)
+                            │ 위험하지 않음        → exit 0, 네트워크 호출 없음
+                            │ POST /v1/gate/check   → 428 approval_required
+                            ◀ exit 2 + stderr: 승인 id, 승인에 쓸 정확한 POST, 보드 URL
+                            모델은 턴을 끝낸다; 소유자가 한 번 승인한다
+                            ──재시도──▶ 200 {allow:true} → 도구 호출 실행, 허가는 소모됨
+```
+
+워커로 태스크 하나를 끝까지:
+
+```bash
+npm start                                                       # 터미널 1
+KEY=...                                                         # /v1/signup이 준 에이전트 키
+npm run worker -- --token "$KEY" --agent claude --runner claude --cwd ~/code/project
+```
+
+워커는 `/v1/inbox`를 롱폴하고, 내게 배정된 태스크를 claim하고, 훅을 설치하고, CLI를 띄우고,
+리스하트비트를 갱신하고, 턴·토큰을 보고하고, 실행 로그와 선언된 출력물을 아티팩트로 올리고,
+태스크를 `review`로 완료한다. 훅이 막으면 태스크는 `awaiting_approval`이 되고, 워커는 소유자의
+결정을 기다렸다가 결정이 쓴 이벤트를 읽고(안 읽으면 훅의 확정 가드가 `409 unread_events`),
+재개 메모와 함께 CLI를 다시 돌려 한 번 재시도하게 한다.
+
+프로젝트에 훅을 직접 붙이기(워커는 태스크마다 자동으로 한다):
+
+```bash
+npm run hooks:install -- --dir . --room-url http://localhost:8787 --task task_ab12cd34 --token "$KEY"
+npm run hooks:remove -- --dir .
+```
+
+`.claude/settings.local.json`에 `PreToolUse` 항목 하나만 병합하고 다른 설정·훅은 보존하며,
+훅이 도구 호출 시점에 읽을 방 URL·태스크·키를 `.ballroom/gate.json`(0600)에 쓴다. 두 경로는
+프로젝트 `.gitignore`에 넣는 것이 맞다.
+
+코드에 적어 둔 정직한 한계: 무엇이 위험한지는 `src/hook/protocol.ts`의 표가 정하므로 표 밖의
+명령은 게이트되지 않고, 방에 닿지 않으면 훅은 닫히며(`--fail-open`으로 그 구멍을 명시), 
+`src/runner/cli.ts`의 Claude Code 플래그는 문서 기준이지 모든 설치 버전에서 실측한 것은 아니다.
 
 ## Phase 0 시뮬레이션
 
@@ -118,8 +174,11 @@ claim 승자 1개, 101회 재전송에 이벤트 1개, 24시간 대기 후에도
 ## 아직 아닌 것
 
 - **MCP 서버, OAuth, 가입 링크 없음.** Phase 3. 지금은 HTTP 키로 참여한다.
-- **훅 스크립트 미포함.** 게이트는 구현·테스트됐고, 훅을 호출하는 CLI 쪽 스크립트와 러너
-  배선이 Phase 2다. 그래서 herdr·damon 어댑터는 명령 매핑까지이며 바이너리 대조 전(UNVERIFIED)이다.
+- **훅은 우선 한 벤더의 이벤트 형태.** Claude Code `PreToolUse`가 검증된 경로이고, 범용 형태
+  (`tool_name`/`tool_input`, `tool:{name,input}`)는 테스트로 덮었다. 다른 CLI는 자체 설정
+  작성기가 필요하다(설치기의 병합 로직을 재사용하면 된다).
+- **damon은 실제 CLI에 매핑했지만 데몬에 대고 돌려 보지는 못했다.** 세션 탐색·usage는
+  `damon-agent-core` v0.9.0 소스 기준이며 이 환경에는 `damond`가 없다.
 - **단일 노드, 단일 writer.** SQLite+WAL이 배포 형태이고 Durable Objects·Postgres는 같은
   저장소 인터페이스 뒤의 어댑터다.
 - **보드 화면은 3초 폴링.** 운영자 화면이며 에이전트는 커서 롱폴/푸시로 기다린다.

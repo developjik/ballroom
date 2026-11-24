@@ -7,8 +7,9 @@ measured** from **what still needs a machine**.
 Reproduce everything below with:
 
 ```bash
-npm test          # 35 tests
+npm test                 # 61 tests (35 kernel + 26 for the hook, the installer, the CLI runner and the worker)
 npm run sim:phase0
+./scripts/verify-phase0-mac.sh   # the hook experiment on this machine (Phase 2)
 ```
 
 ---
@@ -28,25 +29,38 @@ npm run sim:phase0
 
 ## 1. Experiment 1 — does a hook actually block `git push`?
 
-**Status: not run here. Needs the runner machine.**
+**Status: the hook is shipped; the room half and the hook process are measured. Whether a given
+vendor CLI obeys exit 2 in a headless run is still the one thing this repository cannot prove for
+you.**
 
-The gate half is implemented and tested: `POST /v1/gate/check` returns `428` without a grant,
-the owner decision creates one single-use grant, and the retry passes — including when the model
-reorders the flags (`tests/conformance.supplements.test.ts`).
+The gate half was already implemented and tested: `POST /v1/gate/check` returns `428` without a
+grant, the owner decision creates one single-use grant, and the retry passes — including when the
+model reorders the flags (`tests/conformance.supplements.test.ts`).
 
-What is not yet proven is the other half: that Claude Code and Codex actually refuse the tool
-call when their pre-tool hook says no. The design already flags this as unverified, and it is
-the one experiment that can invalidate approval path 1.
+Phase 2 adds the other half: `src/hook/cli.ts` is the process a CLI runs before a tool call.
+`tests/hook.process.test.ts` spawns it as a real child process against a real `ballroomd` and
+asserts the exit codes and the exact stderr a model would read:
 
-To run it (Phase 2):
+| situation | exit | what the model is told |
+|---|---|---|
+| `npm test`, `ls`, a file edit | 0 | nothing (no network call at all) |
+| `git push --force`, `gh pr merge`, `npm publish` without a grant | 2 | the approval id, the `POST` that approves it, the board URL, "the grant is single-use" |
+| approved, but the agent has not read the decision | 2 | the unread `seq` numbers and the inbox URL |
+| room unreachable | 2 | the error, and that `--fail-open` exists |
+| the event on stdin is not JSON | 2 | that the event could not be read |
 
-1. install the hook for `pre_tool_use` in a non-interactive run (`codex exec`, Claude Code
-   headless);
-2. ask the agent to `git push --force` without approval;
-3. record three things: whether the hook fires at all, whether the CLI needs a per-hook trust
-   confirmation, and whether an existing `~/.codex/hooks.json` interferes;
-4. if the hook cannot block, the fallback is the sandbox: the runner executes inside a
-   filesystem/network policy that denies outbound writes, and the gate becomes advisory.
+`./scripts/verify-phase0-mac.sh` runs the same chain end to end on the machine: start `ballroomd`
+on a throwaway port, create a room and an agent, claim a task, run the real hook (exit 2), approve
+through the API, watch the confirm guard refuse the retry until the agent reads, then watch the
+same command pass — and delete the database on the way out. `--full` adds the worker E2E.
+
+What is still unproven, and why it cannot be proven here: that Claude Code itself refuses the tool
+call when its `PreToolUse` hook exits 2 in a non-interactive run, and whether it needs a per-hook
+trust confirmation or collides with an existing `~/.claude` configuration. The hook now exists and
+prints the right thing; the vendor's obedience is the experiment left to the machine that runs it.
+
+If it cannot block, the fallback is unchanged: the sandbox around the runner denies the action,
+and the gate becomes advisory.
 
 ## 2. Experiment 2 — does an assignment survive 24 hours?
 
@@ -115,3 +129,43 @@ assistant, in-memory SQLite.
    different lease model (heartbeat by message, not by request).
 3. Owners stop answering approvals → the 24h expiry blocks tasks, and the room becomes a queue
    that silently stops. The board has to make that visible (Phase 4).
+
+---
+
+## 5. Phase 2 — what was added, and what each piece proves
+
+| piece | what it does | what proves it |
+|---|---|---|
+| `src/hook/` | reads a `PreToolUse` (or generic) event, classifies the command, calls the gate, turns the answer into exit 0/2 and the words a model needs | `tests/hook.process.test.ts` (8 tests, real processes) |
+| `src/hook/install.ts`, `scripts/install-hooks.ts` | merges one hook into `.claude/settings.local.json` without touching anything else; writes `.ballroom/gate.json` 0600; uninstalls exactly its own entry | `tests/hook.install.test.ts` (6 tests) |
+| `src/worker/` | long-poll → claim → installGate → run → renew → usage → artifact → complete; waits out an approval and resumes | `tests/worker.e2e.test.ts` (3 tests) |
+| `src/runner/cli.ts` | a real child CLI: start, steer a live turn over stdin, resume a finished one, stop, usage, artifacts | `tests/runner.cli.test.ts` (9 tests, incl. `runRunnerConformance`) |
+| `src/runner/damon.ts` | corrected to the CLI that exists (`damon prompt/sessions/usage`) | argv tests; **no daemon here** |
+
+### What the worker E2E actually observed
+
+One task, real HTTP, real child processes, a mock CLI that obeys the hook like a model would:
+
+```
+task assigned → worker long-polls → claim → hook 428 → the turn ends
+→ task awaiting_approval → owner approves (grant kind normalized, uses 1)
+→ worker reads the events the decision wrote → claim again → resume the CLI
+→ hook 200 (the reordered retry reuses the grant) → out/evidence.md written
+→ artifact uploaded (name, bytes, sha256, preview) → complete → review
+→ owner verifies → done
+```
+
+Asserted along the way: exactly one approval for the whole task; the event order
+(`task.gate` → `approval.created` → `task.approval_decided` → `grant.created` → `grant.consumed` →
+`artifact.created` → `task.completed`); `turns_used ≥ 2` (the blocked turn is a real turn); and a
+second task assigned to another agent is left alone.
+
+### One correction carried over from Phase 1
+
+`src/runner/damon.ts` used to call `damon session create --project …`. That subcommand does not
+exist. Checked against `developjik/damon-agent-core` v0.9.0 (`src/bin/damon.rs` and `src/rpc.rs`),
+the mapping is now: `damon prompt <text> --backend <agent> --json`, `damon sessions --json` to
+find the session id (the CLI does not print it), `damon usage --session <id> --json`, and
+`/cancel` on stdin before SIGTERM. Damon reports context size and cost, not an input/output token
+split, so the adapter reports `tokens_in/out = 0` instead of inventing them — the room's turn
+budget still applies.

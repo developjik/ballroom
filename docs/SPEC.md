@@ -315,6 +315,21 @@ The gate also runs the **confirm guard for hooks** (§8.2): the hook cannot know
 read, so the room compares `agent.last_delivered_seq` with `task.last_seq` and returns
 `unread_events` when the agent is acting on an older board.
 
+The hook process (`src/hook/cli.ts`) turns that answer into the exit code the CLI understands:
+
+| answer | exit | stderr |
+|---|---|---|
+| `200 {allow:true}` | 0 | — |
+| `428 {approval_id}` | 2 | the action, the reason, the approval id, the `POST /v1/approvals/:id/decision` that approves it, the board URL |
+| `409 {code:"unread_events"}` | 2 | the unread `seq` list and the inbox URL |
+| `429 budget_exhausted`, `403`, `401`, other | 2 | the room's message and code |
+| no answer (room down, timeout) | 2 | the error, and that `--fail-open` turns that into exit 0 with a warning |
+| stdin is not a JSON event | 2 | that the event could not be read |
+
+A command outside the risk table (`src/hook/protocol.ts`: irreversible, spend, outbound) returns 0
+without any network call — a hook that asks the room about `ls` is a hook people remove. Exit 2 is
+what Claude Code treats as "block this call and show stderr to the model".
+
 ### 7.2 Path for hosted assistants (`gate: vendor`)
 
 The room cannot intercept a tool call inside someone else's cloud. It does three things
@@ -472,12 +487,20 @@ The room never imports a runner. Implementations in the box:
 | file | state |
 |---|---|
 | `src/runner/memory.ts` | reference, passes `runRunnerConformance()` (11 checks) |
+| `src/runner/cli.ts` | a real child CLI (`cli.ts`): process lifecycle, stdin steering, stop with SIGTERM→SIGKILL, usage from a usage command, outputs as artifacts; passes the same conformance suite |
 | `src/runner/herdr.ts` | command mapping for `herdr agent start/prompt/read/hook`; subcommands marked UNVERIFIED need a real binary |
-| `src/runner/damon.ts` | command mapping over Damon's `session.*` surface; same caveat |
+| `src/runner/damon.ts` | `damon prompt/sessions/usage` — mapped against damon-agent-core v0.9.0's own source; not yet run against a live `damond` |
 
 `runRunnerConformance(create)` checks construction, start, distinct sessions, `resume`, integer
 `usage`, idempotent `installGate`, `stop` → `exited`, and idempotent `stop`. Adapter authors run
 it before wiring a room to their runner.
+
+The worker (`src/worker/loop.ts`) is the caller that makes the six calls a loop: it long-polls
+`/v1/inbox`, claims what is assigned to it, reads the task up to `last_seq` (the hook's confirm
+guard depends on it), installs the gate, starts the runner, renews the lease on a timer, reports
+usage deltas, uploads artifacts, and completes into `review`. When the task becomes
+`awaiting_approval` it waits for the decision, reads the events the decision wrote, claims again
+and resumes the runner with `resume_note_md`. It never verifies its own work.
 
 ## 14. HTTP API
 
@@ -539,6 +562,9 @@ it before wiring a room to their runner.
 | 10 | Artifacts expose metadata + bounded preview, never a path | `conformance.supplements` |
 | 11 | A runner adapter can prove itself | `conformance.supplements` (11 checks) |
 | 12 | The keeper wakes, expires, unassigns and dispatches deterministically | `keeper`, `simulation` |
+| 13 | A pre-tool hook exits 2 before an unapproved risky command, 2 while events are unread, and 0 after one approval | `hook.process` (real child process) |
+| 14 | The worker drives a task 428 → approval → artifact → review without a second approval | `worker.e2e` (real HTTP, real processes) |
+| 15 | Installing the hook preserves every other setting and is idempotent | `hook.install` |
 
 ## 16. Deployment
 

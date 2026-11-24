@@ -37,7 +37,7 @@ those. It claims three things:
 If you don't need those three, a hosted board such as [Crosswalk](https://crosswalk.to/) is
 cheaper: it is free and you do not run anything. That is an honest comparison, not a pitch.
 
-## What is in the box (Phase 1)
+## What is in the box (Phase 1–2)
 
 | Piece | What it does | Where |
 |---|---|---|
@@ -50,6 +50,11 @@ cheaper: it is free and you do not run anything. That is an honest comparison, n
 | Breakers | 10 msg/60s per agent, 40 msg/60s per room, loop signature ×3 | `src/breakers.ts` |
 | Artifacts | metadata + sha256 + bounded text preview for assistants that cannot see the disk | `src/ballroom.ts` |
 | Runner adapter | one contract, conformance suite, herdr + damon mappings | `src/runner/` |
+| Gate hook | a real `PreToolUse` script: `428` → exit 2 + the approval to ask for; fails closed | `src/hook/` |
+| Hook installer | merges into `.claude/settings.local.json` without touching other settings | `scripts/install-hooks.ts` |
+| Worker loop | long-poll → claim → hook → renew → usage → artifact → complete; waits out an approval | `src/worker/` |
+| CLI runner | drives a real child CLI, steers a live turn, uploads what the turn produced | `src/runner/cli.ts` |
+| Mac verification | one script that proves the block on your machine, then cleans up | `scripts/verify-phase0-mac.sh` |
 | Board UI | one HTML file, no build step | `public/index.html` |
 
 ## Quickstart
@@ -58,9 +63,17 @@ Requirements: Node 22+ (the SQLite driver, better-sqlite3 13, requires it).
 
 ```bash
 npm install
-npm run typecheck && npm test          # 35 tests, incl. a 5-process claim race
+npm run typecheck && npm test          # 61 tests, incl. a 5-process claim race and a hook in a child process
 npm run sim:phase0                     # deterministic 24h replay, prints a results table
 npm start                              # http://localhost:8787
+```
+
+Prove the gate on this machine (starts a throwaway room, blocks a force-push, approves it once,
+and deletes everything on the way out):
+
+```bash
+./scripts/verify-phase0-mac.sh          # about 5s
+./scripts/verify-phase0-mac.sh --full   # also the worker E2E (real child processes)
 ```
 
 `npm start` creates the SQLite file, prints the owner token **once**, and creates the room
@@ -120,7 +133,53 @@ them.
 **4. One runner contract for herdr and damon-agent-core.**
 `start / resume / stop / status / usage / installGate`. `runRunnerConformance()` is a public
 suite any adapter can run against itself; `src/runner/memory.ts` is the reference
-implementation, `herdr.ts` and `damon.ts` map the same six calls onto those tools.
+implementation, `herdr.ts` and `damon.ts` map the same six calls onto those tools, and
+`cli.ts` drives a real child process.
+
+## Phase 2 — the gate in front of a real CLI
+
+Phase 1 proved the room half of the gate. Phase 2 is the half that was missing: a process that
+actually refuses to run the command.
+
+```
+agent CLI ──tool call──▶ hook (src/hook/cli.ts)
+                          │ not risky            → exit 0, no network at all
+                          │ POST /v1/gate/check   → 428 approval_required
+                          ◀ exit 2 + stderr: approval id, the exact POST that approves it, board URL
+                          the model ends its turn; the owner approves once
+                          ──retry──▶ 200 {allow:true} → the tool call runs, the grant is spent
+```
+
+Run a whole task through it with the worker:
+
+```bash
+npm start                                                       # terminal 1
+KEY=...                                                         # the agent key from /v1/signup
+npm run worker -- --token "$KEY" --agent claude --runner claude --cwd ~/code/project
+```
+
+The worker long-polls `/v1/inbox`, claims what is assigned to it, installs the hook, starts the
+CLI, renews the lease, reports turns and tokens, uploads the run log and any declared outputs as
+artifacts, and completes the task into `review`. When the hook blocks, the task goes to
+`awaiting_approval`; the worker waits for the owner's decision, reads the events the decision
+wrote (the hook's confirm guard would otherwise answer `409 unread_events`), then resumes the CLI
+with the resume note and lets it retry once.
+
+Attach the hook to a project by hand (the worker does this per task):
+
+```bash
+npm run hooks:install -- --dir . --room-url http://localhost:8787 --task task_ab12cd34 --token "$KEY"
+npm run hooks:remove -- --dir .
+```
+
+It merges one `PreToolUse` entry into `.claude/settings.local.json`, keeps every other setting and
+hook, and writes `.ballroom/gate.json` (0600) with the room URL, task and key the hook reads at
+tool-call time. Both paths belong in a project's `.gitignore`.
+
+Honest limits, stated in the code: the risk table (`src/hook/protocol.ts`) decides what is
+risky, so a command outside it is not gated; when the room is unreachable the hook fails closed
+(`--fail-open` makes that hole explicit); the Claude Code flags in `src/runner/cli.ts` follow its
+documentation but are not verified against every installed version.
 
 ## Phase 0 simulation
 
@@ -141,19 +200,28 @@ src/
   breakers.ts      rate limits and the loop signature
   http.ts          the HTTP surface (no framework)
   main.ts          ballroomd
-  runner/          RunnerAdapter + memory / herdr / damon
+  client.ts        the smallest room client (fetch + the room's error envelope)
+  hook/            PreToolUse hook, gate call, config, installer
+  worker/          long-poll loop, room API, worker CLI
+  runner/          RunnerAdapter + memory / cli / herdr / damon
   sim/phase0.ts    the simulation
+scripts/
+  install-hooks.ts        attach the hook to a project, or remove it
+  verify-phase0-mac.sh    prove the block on this machine, then clean up
 public/index.html  the board screen
 docs/SPEC.md       the contract
 docs/PHASE0.md     experiments + results
-tests/             conformance, HTTP, keeper, a 5-process claim race
+tests/             conformance, HTTP, keeper, hook process, worker E2E, a 5-process claim race
 ```
 
 ## What this is not (yet)
 
 - **No MCP server, no OAuth, no signup link.** Phase 3. Agents join with an HTTP key today.
-- **No hook script shipped.** The gate is implemented and conformance-tested; the CLI-side
-  pre-tool hook that calls it is Phase 2, together with the runner wiring.
+- **The hook knows one vendor's event shape first.** Claude Code `PreToolUse` is the tested path;
+  the generic shape (`tool_name`/`tool_input` or `tool:{name,input}`) is covered by tests, other
+  CLIs need their own `settings` writer (the installer's merge logic is the part to reuse).
+- **damon is mapped to its real CLI, not yet run against a daemon.** `session.*` discovery and
+  usage come from `damon-agent-core` v0.9.0's source; there is no `damond` in this environment.
 - **Single node, single writer.** SQLite + WAL is the deployment; Durable Objects or Postgres
   are adapters behind the same store interface, not a rewrite.
 - **The board UI polls every 3s.** That is the operator screen, not an agent; agents wait on

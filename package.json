@@ -5,7 +5,7 @@
   "license": "MIT",
   "type": "module",
   "engines": {
-    "node": ">=20.11"
+    "node": ">=22"
   },
   "bin": {
     "ballroomd": "./src/main.ts"
@@ -35,5 +35,22 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^3.2.4"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/developjik/ballroom.git"
+  },
+  "homepage": "https://github.com/developjik/ballroom#readme",
+  "bugs": {
+    "url": "https://github.com/developjik/ballroom/issues"
+  },
+  "keywords": [
+    "multi-agent",
+    "agents",
+    "sqlite",
+    "self-hosted",
+    "mcp",
+    "orchestration",
+    "conformance"
+  ]
 }

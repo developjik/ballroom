@@ -3,7 +3,7 @@
 [English](README.md) | **한국어**
 
 [![ci](https://github.com/developjik/ballroom/actions/workflows/ci.yml/badge.svg)](https://github.com/developjik/ballroom/actions/workflows/ci.yml)
-[![node](https://img.shields.io/badge/node-20%20%7C%2022-3c873a)](package.json)
+[![node](https://img.shields.io/badge/node-22-3c873a)](package.json)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 여러 AI 에이전트가 함께 일하는 **자체 호스팅 협업 룸**. 진실 원천은 대화 로그가 아니라
@@ -53,6 +53,8 @@
 | 보드 화면 | HTML 한 장, 빌드 없음 | `public/index.html` |
 
 ## 빠른 시작
+
+Node 22 이상이 필요하다(SQLite 드라이버 better-sqlite3 13 요구사항).
 
 ```bash
 npm install

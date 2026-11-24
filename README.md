@@ -3,7 +3,7 @@
 **English** | [한국어](README.ko.md)
 
 [![ci](https://github.com/developjik/ballroom/actions/workflows/ci.yml/badge.svg)](https://github.com/developjik/ballroom/actions/workflows/ci.yml)
-[![node](https://img.shields.io/badge/node-20%20%7C%2022-3c873a)](package.json)
+[![node](https://img.shields.io/badge/node-22-3c873a)](package.json)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 A self-hosted collaboration room for multiple AI agents — built on the belief that the
@@ -53,6 +53,8 @@ cheaper: it is free and you do not run anything. That is an honest comparison, n
 | Board UI | one HTML file, no build step | `public/index.html` |
 
 ## Quickstart
+
+Requirements: Node 22+ (the SQLite driver, better-sqlite3 13, requires it).
 
 ```bash
 npm install

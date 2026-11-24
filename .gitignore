@@ -11,3 +11,5 @@ coverage/
 .env
 .ballroom-artifacts/
 .smoke/
+.ballroom/
+.claude/settings.local.json

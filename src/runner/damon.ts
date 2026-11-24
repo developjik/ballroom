@@ -1,137 +1,189 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import type {
-  GateInstall,
-  RunnerAdapter,
-  RunnerSession,
-  RunnerStatus,
-  RunnerUsage,
-  StartInput,
-} from './adapter.js';
-import type { Exec } from './herdr.js';
-
-const run = promisify(execFile);
-
-const defaultExec: Exec = async (argv) => {
-  const [file, ...args] = argv;
-  if (!file) throw new Error('empty command');
-  const { stdout, stderr } = await run(file, args, { maxBuffer: 4 * 1024 * 1024 });
-  return { stdout, stderr };
-};
-
 /**
- * damon-agent-core adapter (command mapping only).
+ * damon-agent-core adapter — mapped onto the CLI that actually exists.
  *
- * Damon is a local Rust daemon that drives nine agent CLIs over their native
- * protocols (`session.create`, `session.resume`, `turn.start`, permission
- * relay). It is the natural host for the runner role: it already owns
- * sessions, permission asks and usage — which is exactly the six calls below.
+ * Source of truth: `developjik/damon-agent-core` v0.9.0, `src/bin/damon.rs`
+ * (checked in this workspace at work/damon-agent-core). What that file shows:
  *
- * Phase 1 ships the mapping; a real wiring needs Damon's RPC (its CLI is a thin
- * client over the same daemon). The argv below is the CLI shape from the
- * project README and is UNVERIFIED against a running daemon.
+ *   damon [--url ws://…] [--token …] [--json] <command>
+ *     prompt <text> [--session <id>] [--backend <id>]   one-shot turn
+ *     sessions --json                                   [{sessionId, createdAt, backend, title}]
+ *     usage [--session <id>] --json                      {sessionId, contextUsed, contextSize, costUsd, turns}
+ *     steer <id> <text…>                                 steer a running turn
+ *     delete <id>                                        deletes a session and its history
+ *     health                                             GET /health
+ *
+ * Phase 1 guessed `damon session create --project …`; no such subcommand exists,
+ * so this file was rewritten against the binary above. The mapping:
+ *
+ *   start   `damon prompt <prompt> --backend <agent> --json`
+ *   resume  live turn → steer over stdin; finished turn → `damon prompt <note> --session <id>`
+ *   stop    `/cancel` on stdin (damon's documented cancel), then SIGTERM
+ *   status  the `damon` client process: alive = running, exit 0 = idle, signalled = exited
+ *   usage   `damon usage --session <id> --json`
+ *   installGate  the room's pre-tool hook into the project (damon has no hook
+ *                installer of its own; its permission relay is a separate path)
+ *
+ * Two honest gaps, both marked in the code:
+ *   - `damon prompt` does not print the session id it created, so the adapter
+ *     discovers it by polling `damon sessions --json` for an entry created after
+ *     the spawn. If discovery times out, usage falls back to the local turn
+ *     count and `backendRef` stays unset.
+ *   - damon reports context size and cost, not a per-turn in/out token split, so
+ *     `tokens_in`/`tokens_out` are 0 and the room's token budget is not fed by
+ *     this adapter (the turn budget still is).
+ *
+ * NOT verified at runtime here: there is no `damond` or `damon` binary in this
+ * environment, so every call below is a mapping proven against the source and
+ * exercised against a stub, not against a live daemon.
  */
-export class DamonRunnerAdapter implements RunnerAdapter {
-  readonly name = 'damon';
-  private readonly exec: Exec;
-  private readonly project: string;
+import { CliRunnerAdapter, type CliRunnerOptions, type DiscoveryContext } from './cli.js';
+import type { RunnerUsage, StartInput } from './adapter.js';
 
-  constructor(options: { exec?: Exec; project?: string } = {}) {
-    this.exec = options.exec ?? defaultExec;
-    this.project = options.project ?? '.';
-  }
+export type Exec = (argv: string[]) => Promise<{ stdout: string; stderr: string }>;
 
-  startArgs(input: StartInput): string[] {
-    return [
-      'damon',
-      'session',
-      'create',
-      '--project',
-      input.cwd ?? this.project,
-      '--agent',
-      input.agent,
-      '--title',
-      `ballroom ${input.task}`,
-      '--prompt',
-      input.prompt,
-    ];
-  }
+export interface DamonOptions {
+  name?: string;
+  /** The `damon` binary (default `damon`). */
+  command?: string;
+  /** Daemon WS URL; omitted → damon's own default (~/.damon/daemon.json, ws://127.0.0.1:9470/ws). */
+  url?: string;
+  /** Auth token (damon also reads DAMON_TOKEN). */
+  token?: string;
+  /** Backend id given to `--backend`; defaults to the agent id. */
+  backend?: string;
+  cwd?: string;
+  installHook?: boolean;
+  /** Poll interval while discovering the session id. Default 200ms. */
+  pollMs?: number;
+  /** How long to wait for the session id to appear. Default 4000ms. */
+  discoverTimeoutMs?: number;
+  env?: Record<string, string>;
+}
 
-  resumeArgs(session: RunnerSession, note: string): string[] {
-    return ['damon', 'session', 'resume', session.id, '--prompt', note];
-  }
+const DEFAULT_DISCOVER_MS = 4000;
+const DEFAULT_POLL_MS = 200;
 
-  stopArgs(session: RunnerSession): string[] {
-    return ['damon', 'session', 'stop', session.id];
-  }
+interface DamonSessionRow {
+  sessionId?: string;
+  createdAt?: string;
+  backend?: string;
+  title?: string;
+}
 
-  statusArgs(session: RunnerSession): string[] {
-    return ['damon', 'session', 'show', session.id, '--json'];
-  }
+export function damonConnectionArgs(options: { url?: string; token?: string }): string[] {
+  return [...(options.url ? ['--url', options.url] : []), ...(options.token ? ['--token', options.token] : [])];
+}
 
-  usageArgs(session: RunnerSession): string[] {
-    return ['damon', 'session', 'usage', session.id, '--json'];
-  }
+export function damonStartArgs(
+  input: StartInput,
+  options: { command?: string; url?: string; token?: string; backend?: string } = {},
+): string[] {
+  return [
+    options.command ?? 'damon',
+    ...damonConnectionArgs(options),
+    'prompt',
+    input.prompt,
+    '--backend',
+    options.backend ?? input.agent,
+    '--json',
+  ];
+}
 
-  /** Damon already relays permission asks; the room's gate is the second guard. */
-  installGateArgs(session: RunnerSession, gate: GateInstall): string[] {
-    return [
-      'damon',
-      'permission',
-      'relay',
-      '--session',
-      session.id,
-      '--room',
-      gate.roomUrl,
-      '--task',
-      gate.task,
-    ];
-  }
+export function damonResumeArgs(
+  session: { id: string; backendRef?: string },
+  note: string,
+  options: { command?: string; url?: string; token?: string } = {},
+): string[] {
+  return [
+    options.command ?? 'damon',
+    ...damonConnectionArgs(options),
+    'prompt',
+    note,
+    '--session',
+    session.backendRef ?? session.id,
+    '--json',
+  ];
+}
 
-  async start(input: StartInput): Promise<RunnerSession> {
-    const { stdout } = await this.exec(this.startArgs(input));
-    let id = '';
-    try {
-      id = (JSON.parse(stdout) as { session_id?: string }).session_id ?? '';
-    } catch {
-      id = stdout.trim().split(/\s+/).pop() ?? '';
-    }
-    if (!id) throw new Error('damon did not return a session id');
-    return { id, agent: input.agent, task: input.task };
-  }
+export function damonUsageArgs(
+  session: { id: string; backendRef?: string },
+  options: { command?: string; url?: string; token?: string } = {},
+): string[] {
+  return [
+    options.command ?? 'damon',
+    ...damonConnectionArgs(options),
+    'usage',
+    '--session',
+    session.backendRef ?? session.id,
+    '--json',
+  ];
+}
 
-  async resume(session: RunnerSession, resumeNote: string): Promise<void> {
-    await this.exec(this.resumeArgs(session, resumeNote));
-  }
+export function damonSessionsArgs(options: { command?: string; url?: string; token?: string } = {}): string[] {
+  return [options.command ?? 'damon', ...damonConnectionArgs(options), 'sessions', '--json'];
+}
 
-  async stop(session: RunnerSession): Promise<void> {
-    await this.exec(this.stopArgs(session));
-  }
+/** `session.usage` per-session shape → the room's usage triple. */
+export function damonUsageParser(raw: string): RunnerUsage {
+  const parsed = JSON.parse(raw) as { turns?: number; contextUsed?: number };
+  const turns = Number(parsed.turns ?? 0);
+  return {
+    turns: Number.isFinite(turns) ? Math.max(0, Math.trunc(turns)) : 0,
+    // damon exposes context size, not an input/output split; report 0 rather
+    // than invent a number the room would bill against.
+    tokens_in: 0,
+    tokens_out: 0,
+  };
+}
 
-  async status(session: RunnerSession): Promise<RunnerStatus> {
-    try {
-      const { stdout } = await this.exec(this.statusArgs(session));
-      const parsed = JSON.parse(stdout) as { status?: string };
-      if (parsed.status === 'running' || parsed.status === 'idle' || parsed.status === 'exited') {
-        return parsed.status;
-      }
-    } catch {
-      // Unknown output is treated as alive; the room's lease is the real guard.
-    }
-    return 'running';
-  }
+export class DamonRunnerAdapter extends CliRunnerAdapter {
+  private readonly damon: DamonOptions;
 
-  async usage(session: RunnerSession): Promise<RunnerUsage> {
-    const { stdout } = await this.exec(this.usageArgs(session));
-    const parsed = JSON.parse(stdout) as Partial<RunnerUsage>;
-    return {
-      turns: Number(parsed.turns ?? 0),
-      tokens_in: Number(parsed.tokens_in ?? 0),
-      tokens_out: Number(parsed.tokens_out ?? 0),
+  constructor(options: DamonOptions = {}) {
+    const damon: DamonOptions = { ...options };
+    const cliOptions: CliRunnerOptions = {
+      name: options.name ?? 'damon',
+      command: damonStartArgs(
+        { agent: '{agent}', task: '{task}', prompt: '{prompt}', ...(options.cwd ? { cwd: options.cwd } : {}) },
+        { ...damon },
+      ),
+      resumeCommand: damonResumeArgs({ id: '{session}', backendRef: '{session}' }, '{note}', { ...damon }),
+      usageCommand: damonUsageArgs({ id: '{session}', backendRef: '{session}' }, { ...damon }),
+      usageParser: damonUsageParser,
+      cancelText: '/cancel',
+      installHook: options.installHook,
+      ...(options.cwd ? { cwd: options.cwd } : {}),
+      ...(options.env ? { env: options.env } : {}),
     };
+    super(cliOptions);
+    this.damon = damon;
   }
 
-  async installGate(session: RunnerSession, gate: GateInstall): Promise<void> {
-    await this.exec(this.installGateArgs(session, gate));
+  /**
+   * `damon prompt` prints the turn, not the session id, so the adapter asks the
+   * daemon for the sessions that appeared after this start and takes the newest.
+   */
+  protected override async discoverSessionId(context: DiscoveryContext): Promise<string | undefined> {
+    const deadline = Date.now() + (this.damon.discoverTimeoutMs ?? DEFAULT_DISCOVER_MS);
+    const since = context.startedAt - 1000;
+    while (Date.now() < deadline) {
+      try {
+        const stdout = await context.exec(damonSessionsArgs({ ...this.damon }));
+        const rows = JSON.parse(stdout) as DamonSessionRow[];
+        const fresh = rows
+          .filter((row): row is DamonSessionRow & { sessionId: string } => typeof row.sessionId === 'string')
+          .filter((row) => {
+            const created = row.createdAt ? Date.parse(row.createdAt) : Number.NaN;
+            return Number.isFinite(created) ? created >= since : true;
+          })
+          .sort((left, right) => (Date.parse(right.createdAt ?? '') || 0) - (Date.parse(left.createdAt ?? '') || 0));
+        const candidate = fresh[0];
+        if (candidate) return candidate.sessionId;
+      } catch {
+        // A daemon that is not up yet will answer on the next poll.
+      }
+      await new Promise<void>((resolveWait) => setTimeout(resolveWait, this.damon.pollMs ?? DEFAULT_POLL_MS));
+    }
+    return undefined;
   }
 }

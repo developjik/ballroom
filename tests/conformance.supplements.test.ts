@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import { Ballroom } from '../src/ballroom.js';
 import { normalizeCommand } from '../src/commands.js';
-import { DamonRunnerAdapter } from '../src/runner/damon.js';
+import { DamonRunnerAdapter, damonResumeArgs, damonStartArgs, damonUsageArgs } from '../src/runner/damon.js';
 import { HerdrRunnerAdapter } from '../src/runner/herdr.js';
 import { MemoryRunnerAdapter } from '../src/runner/memory.js';
 import { assertRunnerConformance, runRunnerConformance } from '../src/runner/adapter.js';
@@ -300,14 +300,23 @@ describe('supplement 4 — runner adapter contract', () => {
       token: 'br_x',
     })).toContain('pre_tool_use');
 
-    const damon = new DamonRunnerAdapter({ exec: async () => ({ stdout: '{"session_id":"s1"}', stderr: '' }) });
-    const damonStart = damon.startArgs({ agent: 'codex', task: 'task_1', prompt: 'go', cwd: '/repo' });
-    expect(damonStart.slice(0, 3)).toEqual(['damon', 'session', 'create']);
-    expect(damon.resumeArgs({ id: 's1', agent: 'codex', task: 'task_1' }, 'note').slice(0, 3)).toEqual([
+    const damon = new DamonRunnerAdapter({ command: 'damon' });
+    expect(damon.name).toBe('damon');
+    const damonStart = damonStartArgs({ agent: 'codex', task: 'task_1', prompt: 'go', cwd: '/repo' });
+    // Phase 2: the argv follows the real CLI (src/bin/damon.rs), not the
+    // `damon session create` shape Phase 1 guessed at.
+    expect(damonStart.slice(0, 2)).toEqual(['damon', 'prompt']);
+    expect(damonStart).toContain('--backend');
+    expect(damonStart).toContain('--json');
+    expect(damonResumeArgs({ id: 'cli-1', backendRef: 'sess_9' }, 'Approval granted')).toEqual([
       'damon',
-      'session',
-      'resume',
+      'prompt',
+      'Approval granted',
+      '--session',
+      'sess_9',
+      '--json',
     ]);
+    expect(damonUsageArgs({ id: 'cli-1', backendRef: 'sess_9' })).toContain('usage');
   });
 });
 

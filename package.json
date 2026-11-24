@@ -12,6 +12,7 @@
   },
   "files": [
     "src",
+    "scripts",
     "public",
     "docs",
     "README.md",
@@ -24,7 +25,12 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:conformance": "vitest run tests/conformance.phase1.test.ts tests/conformance.supplements.test.ts",
-    "sim:phase0": "tsx src/sim/phase0.ts"
+    "sim:phase0": "tsx src/sim/phase0.ts",
+    "worker": "tsx src/worker/cli.ts",
+    "hook": "tsx src/hook/cli.ts",
+    "hooks:install": "tsx scripts/install-hooks.ts",
+    "hooks:remove": "tsx scripts/install-hooks.ts --remove",
+    "verify:mac": "bash scripts/verify-phase0-mac.sh"
   },
   "dependencies": {
     "better-sqlite3": "^13.2.0"
